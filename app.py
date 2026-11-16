@@ -1,9 +1,8 @@
 from flask import Flask, render_template_string, request, jsonify
-from deep_translator import GoogleTranslator, MyMemoryTranslator
+import requests
 
 app = Flask(__name__)
 
-# Complete HTML, CSS, and JavaScript interface embedded in one file
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -201,7 +200,6 @@ HTML_TEMPLATE = """
 
         recognition.onend = () => {
             if (isRecording) {
-                // Keep listening until user clicks Stop
                 recognition.start();
             } else if (finalTranscript.trim().length > 0) {
                 translateText(finalTranscript.trim());
@@ -242,18 +240,36 @@ HTML_TEMPLATE = """
         appendBox("inputBox", `[${srcName}]: ${text}`);
 
         try {
-            const response = await fetch("/translate", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ text, srcCode, tgtCode, srcSr, tgtSr })
-            });
-            const data = await response.json();
+            let translatedText = "";
 
-            if (data.error) throw new Error(data.error);
+            if (srcCode === tgtCode) {
+                translatedText = text;
+            } else {
+                // 1. Try our Python backend first
+                const response = await fetch("/translate", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ text, srcCode, tgtCode })
+                });
+                const data = await response.json();
 
-            appendBox("outputBox", `[${tgtName}]: ${data.translation}`);
+                if (data.translation) {
+                    translatedText = data.translation;
+                } else {
+                    // 2. Fallback: Fetch directly from user's browser (bypasses Render's shared IP limits)
+                    const mmRes = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${srcCode}|${tgtCode}`);
+                    const mmData = await mmRes.json();
+                    if (mmData.responseData && mmData.responseData.translatedText) {
+                        translatedText = mmData.responseData.translatedText;
+                    } else {
+                        throw new Error("All translation services are currently busy.");
+                    }
+                }
+            }
+
+            appendBox("outputBox", `[${tgtName}]: ${translatedText}`);
             document.getElementById("status").innerText = "🔊 Speaking translation...";
-            speakOutLoud(data.translation, tgtSr);
+            speakOutLoud(translatedText, tgtSr);
         } catch (err) {
             document.getElementById("status").innerText = "❌ Translation Error: " + err.message;
         } finally {
@@ -312,23 +328,27 @@ def translate():
     text = data.get("text", "")
     src_code = data.get("srcCode")
     tgt_code = data.get("tgtCode")
-    src_sr = data.get("srcSr")
-    tgt_sr = data.get("tgtSr")
-
-    if src_code == tgt_code:
-        return jsonify({"translation": text})
 
     try:
-        translated = GoogleTranslator(source=src_code, target=tgt_code).translate(text)
-        if not translated:
-            translated = MyMemoryTranslator(source=src_sr, target=tgt_sr).translate(text)
+        # Direct GTX endpoint with browser headers (much less likely to be rate-limited than scraper)
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {
+            "client": "gtx",
+            "sl": src_code,
+            "tl": tgt_code,
+            "dt": "t",
+            "q": text
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        resp = requests.get(url, params=params, headers=headers, timeout=8)
+        resp.raise_for_status()
+        result = resp.json()
+        translated = "".join([part[0] for part in result[0] if part[0]])
         return jsonify({"translation": translated})
-    except Exception:
-        try:
-            translated = MyMemoryTranslator(source=src_sr, target=tgt_sr).translate(text)
-            return jsonify({"translation": translated})
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(debug=True)
