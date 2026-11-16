@@ -13,7 +13,7 @@ HTML_TEMPLATE = """
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: url('/static/unnamed.jpg') no-repeat center center fixed;
+            background: url('/static/unnamed.png') no-repeat center center fixed;
             background-size: cover;
             display: flex;
             justify-content: center;
