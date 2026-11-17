@@ -1,6 +1,6 @@
-from flask import Flask, render_template_string, request, jsonify, send_file
+﻿from flask import Flask, render_template_string, request, jsonify, send_file
+import requests
 import io
-import re
 from pypdf import PdfReader
 from gtts import gTTS
 
@@ -258,35 +258,6 @@ HTML_TEMPLATE = r"""
 </div>
 
 <script>
-    // --- CLIENT-SIDE TRANSLATOR (Runs from User's Browser IP — Never Blocked by Render) ---
-    async function browserTranslate(text, srcCode, tgtCode) {
-        if (!text.trim() || srcCode === tgtCode) return text;
-
-        // 1. Primary: Google GTX directly from user's browser
-        try {
-            const gtxUrl = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=" +
-                encodeURIComponent(srcCode) + "&tl=" + encodeURIComponent(tgtCode) +
-                "&dt=t&q=" + encodeURIComponent(text);
-            const res = await fetch(gtxUrl);
-            if (res.ok) {
-                const data = await res.json();
-                return data[0].map(part => part[0] || "").join("");
-            }
-        } catch (e) {}
-
-        // 2. Fallback: MyMemory API from user's browser
-        const pairSrc = (srcCode === "auto") ? "en" : srcCode;
-        const mmUrl = "https://api.mymemory.translated.net/get?q=" +
-            encodeURIComponent(text.slice(0, 500)) + "&langpair=" + pairSrc + "|" + tgtCode;
-        const mmRes = await fetch(mmUrl);
-        const mmData = await mmRes.json();
-        if (mmData.responseData && mmData.responseData.translatedText) {
-            return mmData.responseData.translatedText;
-        }
-        throw new Error("Translation limit reached. Wait a moment and try again.");
-    }
-
-    // --- UNIVERSAL AUDIO PLAYER ---
     let currentAudio = null;
 
     function stopAllAudio() {
@@ -333,7 +304,6 @@ HTML_TEMPLATE = r"""
         }
     }
 
-    // --- SECTION 1: VOICE TRANSLATOR ---
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     let recognition = null;
     let finalTranscript = "";
@@ -357,4 +327,283 @@ HTML_TEMPLATE = r"""
                     interim += event.results[i][0].transcript;
                 }
             }
-            document.getElementById("voiceStatus").innerText = "🎙️ Hearing: " + (finalTranscript +
+            document.getElementById("voiceStatus").innerText = "🎙️ Hearing: " + (finalTranscript + interim);
+        };
+
+        recognition.onerror = (event) => {
+            document.getElementById("voiceStatus").innerText = "❌ Mic Error: " + event.error;
+            isRecording = false;
+            resetVoiceButtons();
+        };
+
+        recognition.onend = () => {
+            if (isRecording) {
+                try { recognition.start(); } catch (e) {}
+            } else if (finalTranscript.trim().length > 0) {
+                translateVoiceText(finalTranscript.trim());
+            } else {
+                document.getElementById("voiceStatus").innerText = "⚠️ Nothing heard. Try speaking again.";
+                resetVoiceButtons();
+            }
+        };
+    }
+
+    function startListening() {
+        if (!recognition) return;
+        stopAllAudio();
+        finalTranscript = "";
+        isRecording = true;
+        const srcFull = document.getElementById("srcLang").value;
+        recognition.lang = srcFull.split("|")[0];
+
+        document.getElementById("startBtn").disabled = true;
+        document.getElementById("stopBtn").disabled = false;
+        document.getElementById("voiceStatus").innerText = "🎙️ Listening... Speak now!";
+        try {
+            recognition.start();
+        } catch (e) {
+            document.getElementById("voiceStatus").innerText = "❌ Mic start error: " + e.message;
+            resetVoiceButtons();
+        }
+    }
+
+    function stopListening() {
+        isRecording = false;
+        document.getElementById("stopBtn").disabled = true;
+        document.getElementById("voiceStatus").innerText = "🔄 Translating...";
+        if (recognition) recognition.stop();
+    }
+
+    async function translateVoiceText(text) {
+        const srcSelect = document.getElementById("srcLang");
+        const tgtSelect = document.getElementById("tgtLang");
+        const srcCode = srcSelect.value.split("|")[1];
+        const [tgtBcp, tgtCode] = tgtSelect.value.split("|");
+        const srcName = srcSelect.options[srcSelect.selectedIndex].text;
+        const tgtName = tgtSelect.options[tgtSelect.selectedIndex].text;
+
+        appendBox("voiceInputBox", "[" + srcName + "]: " + text);
+
+        try {
+            let translatedText = "";
+            if (srcCode === tgtCode) {
+                translatedText = text;
+            } else {
+                const response = await fetch("/translate", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ text: text, srcCode: srcCode, tgtCode: tgtCode })
+                });
+                const data = await response.json();
+
+                if (data.translation) {
+                    translatedText = data.translation;
+                } else {
+                    const mmRes = await fetch("https://api.mymemory.translated.net/get?q=" + encodeURIComponent(text) + "&langpair=" + srcCode + "|" + tgtCode);
+                    const mmData = await mmRes.json();
+                    if (mmData.responseData && mmData.responseData.translatedText) {
+                        translatedText = mmData.responseData.translatedText;
+                    } else {
+                        throw new Error("Translation service busy.");
+                    }
+                }
+            }
+
+            latestVoiceTranslation = translatedText;
+            appendBox("voiceOutputBox", "[" + tgtName + "]: " + translatedText);
+            document.getElementById("voiceStatus").innerText = "🔊 Speaking in " + tgtName + "...";
+            await speakUniversal(translatedText, tgtCode, tgtBcp, "voiceStatus");
+        } catch (err) {
+            document.getElementById("voiceStatus").innerText = "❌ Error: " + err.message;
+        } finally {
+            resetVoiceButtons();
+        }
+    }
+
+    function replayVoice() {
+        if (!latestVoiceTranslation.trim()) {
+            document.getElementById("voiceStatus").innerText = "⚠️ Nothing translated yet to speak.";
+            return;
+        }
+        const [tgtBcp, tgtCode] = document.getElementById("tgtLang").value.split("|");
+        document.getElementById("voiceStatus").innerText = "🔊 Speaking translation...";
+        speakUniversal(latestVoiceTranslation, tgtCode, tgtBcp, "voiceStatus");
+    }
+
+    function swapLanguages() {
+        const src = document.getElementById("srcLang");
+        const tgt = document.getElementById("tgtLang");
+        const temp = src.value;
+        src.value = tgt.value;
+        tgt.value = temp;
+    }
+
+    function clearVoice() {
+        stopAllAudio();
+        latestVoiceTranslation = "";
+        document.getElementById("voiceInputBox").value = "";
+        document.getElementById("voiceOutputBox").value = "";
+        document.getElementById("voiceStatus").innerText = "Cleared! Ready to start.";
+    }
+
+    function resetVoiceButtons() {
+        document.getElementById("startBtn").disabled = false;
+        document.getElementById("stopBtn").disabled = true;
+    }
+
+    let latestPdfTranslation = "";
+
+    async function uploadAndTranslatePDF() {
+        const fileInput = document.getElementById("pdfInput");
+        if (!fileInput.files.length) {
+            document.getElementById("pdfStatus").innerText = "⚠️ Please choose a PDF file first.";
+            return;
+        }
+
+        const tgtSelect = document.getElementById("pdfTgtLang");
+        const tgtCode = tgtSelect.value.split("|")[1];
+        const tgtName = tgtSelect.options[tgtSelect.selectedIndex].text;
+
+        const formData = new FormData();
+        formData.append("pdf", fileInput.files[0]);
+        formData.append("tgtCode", tgtCode);
+
+        document.getElementById("pdfBtn").disabled = true;
+        document.getElementById("pdfStatus").innerText = "📄 Extracting and translating PDF...";
+
+        try {
+            const response = await fetch("/translate-pdf", {
+                method: "POST",
+                body: formData
+            });
+            const data = await response.json();
+            if (data.error) throw new Error(data.error);
+
+            document.getElementById("pdfInputBox").value = data.original;
+            document.getElementById("pdfOutputBox").value = data.translation;
+            latestPdfTranslation = data.translation;
+            document.getElementById("pdfStatus").innerText = "✅ Translated to " + tgtName + "! Click 'Read PDF Aloud' to listen.";
+        } catch (err) {
+            document.getElementById("pdfStatus").innerText = "❌ PDF Error: " + err.message;
+        } finally {
+            document.getElementById("pdfBtn").disabled = false;
+        }
+    }
+
+    function readPdfAloud() {
+        const text = latestPdfTranslation || document.getElementById("pdfOutputBox").value;
+        if (!text.trim()) {
+            document.getElementById("pdfStatus").innerText = "⚠️ Upload and translate a PDF first.";
+            return;
+        }
+        const tgtSelect = document.getElementById("pdfTgtLang");
+        const [tgtBcp, tgtCode] = tgtSelect.value.split("|");
+        const tgtName = tgtSelect.options[tgtSelect.selectedIndex].text;
+        document.getElementById("pdfStatus").innerText = "🔊 Reading PDF in " + tgtName + "...";
+        speakUniversal(text, tgtCode, tgtBcp, "pdfStatus");
+    }
+
+    function clearPdf() {
+        stopAllAudio();
+        latestPdfTranslation = "";
+        document.getElementById("pdfInput").value = "";
+        document.getElementById("pdfInputBox").value = "";
+        document.getElementById("pdfOutputBox").value = "";
+        document.getElementById("pdfStatus").innerText = "Cleared! Upload a new PDF.";
+    }
+
+    function appendBox(id, text) {
+        const box = document.getElementById(id);
+        box.value = box.value ? box.value + "\n----------------------------------------\n" + text : text;
+        box.scrollTop = box.scrollHeight;
+    }
+</script>
+
+</body>
+</html>
+"""
+
+def gtx_translate(text, src_code, tgt_code):
+    url = "https://translate.googleapis.com/translate_a/single"
+    params = {
+        "client": "gtx",
+        "sl": src_code,
+        "tl": tgt_code,
+        "dt": "t",
+        "q": text
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    resp = requests.get(url, params=params, headers=headers, timeout=10)
+    resp.raise_for_status()
+    result = resp.json()
+    return "".join([part[0] for part in result[0] if part[0]])
+
+@app.route("/")
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route("/tts", methods=["POST"])
+def tts():
+    data = request.json or {}
+    text = data.get("text", "").strip()
+    lang = data.get("lang", "en")
+    if not text:
+        return jsonify({"error": "No text"}), 400
+    try:
+        tts_obj = gTTS(text=text, lang=lang)
+        mp3_fp = io.BytesIO()
+        tts_obj.write_to_fp(mp3_fp)
+        mp3_fp.seek(0)
+        return send_file(mp3_fp, mimetype="audio/mpeg")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/translate", methods=["POST"])
+def translate():
+    data = request.json
+    text = data.get("text", "")
+    src_code = data.get("srcCode")
+    tgt_code = data.get("tgtCode")
+
+    try:
+        translated = gtx_translate(text, src_code, tgt_code)
+        return jsonify({"translation": translated})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/translate-pdf", methods=["POST"])
+def translate_pdf():
+    if "pdf" not in request.files:
+        return jsonify({"error": "No PDF file uploaded."}), 400
+
+    pdf_file = request.files["pdf"]
+    tgt_code = request.form.get("tgtCode", "en")
+
+    try:
+        reader = PdfReader(pdf_file)
+        pages_text = []
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                pages_text.append(extracted.strip())
+
+        full_text = "\n\n".join(pages_text)
+        if not full_text.strip():
+            return jsonify({"error": "No selectable text found in this PDF (it may be a scanned image)."}), 400
+
+        chunk_size = 2500
+        chunks = [full_text[i:i + chunk_size] for i in range(0, len(full_text), chunk_size)]
+        translated_chunks = [gtx_translate(chunk, "auto", tgt_code) for chunk in chunks]
+        translated_full = "\n".join(translated_chunks)
+
+        return jsonify({
+            "original": full_text,
+            "translation": translated_full
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    app.run(debug=True)
