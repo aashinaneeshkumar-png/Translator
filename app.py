@@ -1,4 +1,4 @@
-﻿from flask import Flask, render_template_string, request, jsonify, send_file
+from flask import Flask, render_template_string, request, jsonify, send_file
 import requests
 import io
 from pypdf import PdfReader
@@ -104,6 +104,7 @@ HTML_TEMPLATE = r"""
             margin-bottom: 15px;
             min-height: 20px;
             font-weight: 500;
+            word-break: break-word;
         }
         label {
             font-weight: 600;
@@ -304,6 +305,31 @@ HTML_TEMPLATE = r"""
         }
     }
 
+    // Client-side translation with GTX primary + MyMemory fallback (avoids server 429 blocks)
+    async function clientTranslateChunk(text, srcCode, tgtCode) {
+        if (srcCode === tgtCode) return text;
+        try {
+            const gtxUrl = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=" + encodeURIComponent(srcCode) + "&tl=" + encodeURIComponent(tgtCode) + "&dt=t&q=" + encodeURIComponent(text);
+            const res = await fetch(gtxUrl);
+            if (res.ok) {
+                const data = await res.json();
+                if (data && data[0]) {
+                    return data[0].map(part => part[0] || "").join("");
+                }
+            }
+        } catch (e) {}
+
+        // Fallback to MyMemory if GTX throttles
+        const mmSrc = srcCode === "auto" ? "en" : srcCode;
+        const mmUrl = "https://api.mymemory.translated.net/get?q=" + encodeURIComponent(text.slice(0, 480)) + "&langpair=" + mmSrc + "|" + tgtCode;
+        const mmRes = await fetch(mmUrl);
+        const mmData = await mmRes.json();
+        if (mmData && mmData.responseData && mmData.responseData.translatedText) {
+            return mmData.responseData.translatedText;
+        }
+        throw new Error("Translation rate-limited. Please try again in a moment.");
+    }
+
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     let recognition = null;
     let finalTranscript = "";
@@ -385,30 +411,7 @@ HTML_TEMPLATE = r"""
         appendBox("voiceInputBox", "[" + srcName + "]: " + text);
 
         try {
-            let translatedText = "";
-            if (srcCode === tgtCode) {
-                translatedText = text;
-            } else {
-                const response = await fetch("/translate", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ text: text, srcCode: srcCode, tgtCode: tgtCode })
-                });
-                const data = await response.json();
-
-                if (data.translation) {
-                    translatedText = data.translation;
-                } else {
-                    const mmRes = await fetch("https://api.mymemory.translated.net/get?q=" + encodeURIComponent(text) + "&langpair=" + srcCode + "|" + tgtCode);
-                    const mmData = await mmRes.json();
-                    if (mmData.responseData && mmData.responseData.translatedText) {
-                        translatedText = mmData.responseData.translatedText;
-                    } else {
-                        throw new Error("Translation service busy.");
-                    }
-                }
-            }
-
+            const translatedText = await clientTranslateChunk(text, srcCode, tgtCode);
             latestVoiceTranslation = translatedText;
             appendBox("voiceOutputBox", "[" + tgtName + "]: " + translatedText);
             document.getElementById("voiceStatus").innerText = "🔊 Speaking in " + tgtName + "...";
@@ -466,22 +469,41 @@ HTML_TEMPLATE = r"""
 
         const formData = new FormData();
         formData.append("pdf", fileInput.files[0]);
-        formData.append("tgtCode", tgtCode);
 
         document.getElementById("pdfBtn").disabled = true;
-        document.getElementById("pdfStatus").innerText = "📄 Extracting and translating PDF...";
+        document.getElementById("pdfStatus").innerText = "📄 Extracting PDF text...";
 
         try {
-            const response = await fetch("/translate-pdf", {
+            const response = await fetch("/extract-pdf", {
                 method: "POST",
                 body: formData
             });
             const data = await response.json();
             if (data.error) throw new Error(data.error);
 
-            document.getElementById("pdfInputBox").value = data.original;
-            document.getElementById("pdfOutputBox").value = data.translation;
-            latestPdfTranslation = data.translation;
+            const fullText = data.original;
+            document.getElementById("pdfInputBox").value = fullText;
+            document.getElementById("pdfOutputBox").value = "";
+
+            // Split into 900-char chunks and translate from browser to avoid server 429 errors
+            const chunkSize = 900;
+            const chunks = [];
+            for (let i = 0; i < fullText.length; i += chunkSize) {
+                chunks.push(fullText.slice(i, i + chunkSize));
+            }
+
+            let translatedParts = [];
+            for (let idx = 0; idx < chunks.length; idx++) {
+                document.getElementById("pdfStatus").innerText = "🔄 Translating part " + (idx + 1) + " of " + chunks.length + " into " + tgtName + "...";
+                const partTranslated = await clientTranslateChunk(chunks[idx], "auto", tgtCode);
+                translatedParts.push(partTranslated);
+                document.getElementById("pdfOutputBox").value = translatedParts.join("\n");
+                if (idx < chunks.length - 1) {
+                    await new Promise(r => setTimeout(r, 350));
+                }
+            }
+
+            latestPdfTranslation = translatedParts.join("\n");
             document.getElementById("pdfStatus").innerText = "✅ Translated to " + tgtName + "! Click 'Read PDF Aloud' to listen.";
         } catch (err) {
             document.getElementById("pdfStatus").innerText = "❌ PDF Error: " + err.message;
@@ -523,23 +545,6 @@ HTML_TEMPLATE = r"""
 </html>
 """
 
-def gtx_translate(text, src_code, tgt_code):
-    url = "https://translate.googleapis.com/translate_a/single"
-    params = {
-        "client": "gtx",
-        "sl": src_code,
-        "tl": tgt_code,
-        "dt": "t",
-        "q": text
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-    resp = requests.get(url, params=params, headers=headers, timeout=10)
-    resp.raise_for_status()
-    result = resp.json()
-    return "".join([part[0] for part in result[0] if part[0]])
-
 @app.route("/")
 def index():
     return render_template_string(HTML_TEMPLATE)
@@ -560,27 +565,12 @@ def tts():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/translate", methods=["POST"])
-def translate():
-    data = request.json
-    text = data.get("text", "")
-    src_code = data.get("srcCode")
-    tgt_code = data.get("tgtCode")
-
-    try:
-        translated = gtx_translate(text, src_code, tgt_code)
-        return jsonify({"translation": translated})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/translate-pdf", methods=["POST"])
-def translate_pdf():
+@app.route("/extract-pdf", methods=["POST"])
+def extract_pdf():
     if "pdf" not in request.files:
         return jsonify({"error": "No PDF file uploaded."}), 400
 
     pdf_file = request.files["pdf"]
-    tgt_code = request.form.get("tgtCode", "en")
-
     try:
         reader = PdfReader(pdf_file)
         pages_text = []
@@ -593,15 +583,7 @@ def translate_pdf():
         if not full_text.strip():
             return jsonify({"error": "No selectable text found in this PDF (it may be a scanned image)."}), 400
 
-        chunk_size = 2500
-        chunks = [full_text[i:i + chunk_size] for i in range(0, len(full_text), chunk_size)]
-        translated_chunks = [gtx_translate(chunk, "auto", tgt_code) for chunk in chunks]
-        translated_full = "\n".join(translated_chunks)
-
-        return jsonify({
-            "original": full_text,
-            "translation": translated_full
-        })
+        return jsonify({"original": full_text})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
