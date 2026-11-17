@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, Response
 import requests
 from pypdf import PdfReader
 
@@ -18,26 +18,35 @@ HTML_TEMPLATE = """
             background-size: cover;
             background-color: #f0f2f5;
             display: flex;
-            justify-content: center;
+            flex-direction: column;
             align-items: center;
             min-height: 100vh;
             margin: 0;
-            padding: 20px 0;
+            padding: 35px 15px 60px 15px;
+            gap: 35px;
         }
         .container {
-            background: rgba(255, 255, 255, 0.94);
+            background: rgba(255, 255, 255, 0.95);
             backdrop-filter: blur(6px);
             padding: 30px;
             border-radius: 16px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.18);
-            width: 90%;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.16);
+            width: 100%;
             max-width: 680px;
+            box-sizing: border-box;
         }
-        h1 {
+        h1, h2 {
             text-align: center;
             color: #1a202c;
             margin-top: 0;
-            font-size: 24px;
+            font-size: 23px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #718096;
+            font-size: 13px;
+            margin-top: -10px;
+            margin-bottom: 18px;
         }
         .controls {
             display: flex;
@@ -64,11 +73,11 @@ HTML_TEMPLATE = """
             font-weight: bold;
         }
         .swap-btn:hover { background: #e2e8f0; }
-        .pdf-section {
+        .pdf-upload-bar {
             background: #edf2f7;
             border: 1px dashed #a0aec0;
             border-radius: 10px;
-            padding: 12px 15px;
+            padding: 14px;
             margin-bottom: 15px;
             display: flex;
             flex-wrap: wrap;
@@ -76,21 +85,16 @@ HTML_TEMPLATE = """
             justify-content: space-between;
             gap: 10px;
         }
-        .pdf-section input[type="file"] {
-            font-size: 14px;
-            color: #2d3748;
+        .pdf-lang-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 15px;
         }
-        #pdfBtn {
-            background-color: #38a169;
-            padding: 8px 16px;
-            border: none;
-            border-radius: 8px;
-            color: white;
-            font-weight: 600;
-            cursor: pointer;
-            font-size: 14px;
+        .pdf-lang-row label {
+            margin: 0;
+            white-space: nowrap;
         }
-        #pdfBtn:disabled { background-color: #a0aec0; cursor: not-allowed; }
         .status {
             text-align: center;
             font-size: 14px;
@@ -138,14 +142,18 @@ HTML_TEMPLATE = """
         }
         #startBtn { background-color: #3182ce; }
         #stopBtn { background-color: #e53e3e; }
-        #speakOutBtn { background-color: #805ad5; }
-        #clearBtn { background-color: #718096; }
+        #voiceSpeakBtn, #pdfSpeakBtn { background-color: #805ad5; }
+        #pdfBtn { background-color: #38a169; }
+        .stop-audio-btn { background-color: #dd6b20; }
+        .clear-btn { background-color: #718096; }
     </style>
 </head>
 <body>
 
+<!-- SECTION 1: VOICE TRANSLATOR -->
 <div class="container">
-    <h1>🌍 Voice & PDF Multi-Language Translator</h1>
+    <h1>🎤 Voice-to-Voice Translator</h1>
+    <div class="subtitle">Scroll down for PDF Document Upload & Reader ↓</div>
     
     <div class="controls">
         <select id="srcLang">
@@ -185,35 +193,143 @@ HTML_TEMPLATE = """
         </select>
     </div>
 
-    <div class="pdf-section">
-        <input type="file" id="pdfInput" accept=".pdf">
-        <button id="pdfBtn" onclick="uploadAndTranslatePDF()">📄 Translate PDF</button>
-    </div>
+    <div class="status" id="voiceStatus">Click "Start Speaking", talk, then click "Stop & Translate"</div>
 
-    <div class="status" id="status">Speak using the mic OR upload a PDF file above</div>
-
-    <label>📝 Extracted / Spoken Text:</label>
-    <textarea id="inputBox" readonly placeholder="Your spoken words or extracted PDF text will appear here..."></textarea>
+    <label>📝 What you said:</label>
+    <textarea id="voiceInputBox" readonly placeholder="Your spoken words will appear here..."></textarea>
 
     <label>💡 Translated Output:</label>
-    <textarea id="outputBox" readonly placeholder="Translation will appear here..."></textarea>
+    <textarea id="voiceOutputBox" readonly placeholder="Translation will appear here..."></textarea>
 
     <div class="btn-group">
         <button id="startBtn" class="action-btn" onclick="startListening()">🎤 Start Speaking</button>
         <button id="stopBtn" class="action-btn" onclick="stopListening()" disabled>⏹️ Stop & Translate</button>
-        <button id="speakOutBtn" class="action-btn" onclick="readOutputAloud()">🔊 Read Translation</button>
-        <button id="clearBtn" class="action-btn" onclick="clearText()">🗑️ Clear</button>
+        <button id="voiceSpeakBtn" class="action-btn" onclick="replayVoice()">🔊 Replay Audio</button>
+        <button class="action-btn stop-audio-btn" onclick="stopAllAudio()">🔇 Stop Audio</button>
+        <button class="action-btn clear-btn" onclick="clearVoice()">🗑️ Clear</button>
+    </div>
+</div>
+
+<!-- SECTION 2: PDF UPLOAD & READER -->
+<div class="container" id="pdf-section">
+    <h2>📄 PDF Document Translator & Reader</h2>
+    <div class="subtitle">Upload any PDF, translate it, and listen in any language</div>
+
+    <div class="pdf-lang-row">
+        <label for="pdfTgtLang">Translate PDF to:</label>
+        <select id="pdfTgtLang">
+            <option value="en" selected>English</option>
+            <option value="hi">Hindi</option>
+            <option value="ml">Malayalam</option>
+            <option value="ta">Tamil</option>
+            <option value="te">Telugu</option>
+            <option value="kn">Kannada</option>
+            <option value="bn">Bengali</option>
+            <option value="mr">Marathi</option>
+            <option value="es">Spanish</option>
+            <option value="fr">French</option>
+            <option value="de">German</option>
+            <option value="ar">Arabic</option>
+            <option value="ja">Japanese</option>
+            <option value="ko">Korean</option>
+        </select>
+    </div>
+
+    <div class="pdf-upload-bar">
+        <input type="file" id="pdfInput" accept=".pdf">
+        <button id="pdfBtn" class="action-btn" onclick="uploadAndTranslatePDF()">📄 Translate PDF</button>
+    </div>
+
+    <div class="status" id="pdfStatus">Choose a PDF file above and click "Translate PDF"</div>
+
+    <label>📑 Extracted PDF Text:</label>
+    <textarea id="pdfInputBox" readonly placeholder="Extracted PDF content will appear here..."></textarea>
+
+    <label>🌐 Translated PDF Content:</label>
+    <textarea id="pdfOutputBox" readonly placeholder="Translated PDF content will appear here..."></textarea>
+
+    <div class="btn-group">
+        <button id="pdfSpeakBtn" class="action-btn" onclick="readPdfAloud()">🔊 Read PDF Aloud</button>
+        <button class="action-btn stop-audio-btn" onclick="stopAllAudio()">🔇 Stop Audio</button>
+        <button class="action-btn clear-btn" onclick="clearPdf()">🗑️ Clear PDF</button>
     </div>
 </div>
 
 <script>
+    // --- UNIVERSAL CLOUD AUDIO PLAYER (Works for Telugu, Malayalam, Tamil, Hindi, etc.) ---
+    let currentAudio = null;
+    let audioQueue = [];
+    let isPlayingQueue = false;
+
+    function stopAllAudio() {
+        isPlayingQueue = false;
+        audioQueue = [];
+        if (currentAudio) {
+            currentAudio.pause();
+            currentAudio.currentTime = 0;
+            currentAudio = null;
+        }
+        window.speechSynthesis.cancel();
+    }
+
+    function speakCloudText(text, langCode, statusElementId) {
+        stopAllAudio();
+        if (!text || !text.trim()) return;
+
+        // Split long text into ~170-character natural chunks for smooth playback
+        const sentences = text.match(/[^.!?।\n]+[.!?।\n]*/g) || [text];
+        let chunks = [];
+        let currentChunk = "";
+
+        for (let s of sentences) {
+            if ((currentChunk + s).length <= 170) {
+                currentChunk += s;
+            } else {
+                if (currentChunk.trim()) chunks.push(currentChunk.trim());
+                if (s.length > 170) {
+                    for (let i = 0; i < s.length; i += 170) {
+                        chunks.push(s.slice(i, i + 170).trim());
+                    }
+                    currentChunk = "";
+                } else {
+                    currentChunk = s;
+                }
+            }
+        }
+        if (currentChunk.trim()) chunks.push(currentChunk.trim());
+
+        audioQueue = chunks;
+        isPlayingQueue = true;
+        playNextChunk(langCode, statusElementId);
+    }
+
+    function playNextChunk(langCode, statusElementId) {
+        if (!isPlayingQueue || audioQueue.length === 0) {
+            isPlayingQueue = false;
+            document.getElementById(statusElementId).innerText = "✅ Finished reading!";
+            return;
+        }
+
+        const chunk = audioQueue.shift();
+        const url = `/tts?lang=${encodeURIComponent(langCode)}&q=${encodeURIComponent(chunk)}`;
+        currentAudio = new Audio(url);
+
+        currentAudio.onended = () => playNextChunk(langCode, statusElementId);
+        currentAudio.onerror = () => playNextChunk(langCode, statusElementId);
+        currentAudio.play().catch(err => {
+            document.getElementById(statusElementId).innerText = "⚠️ Click 'Replay / Read Aloud' button to play audio.";
+        });
+    }
+
+    // --- SECTION 1: VOICE TRANSLATOR LOGIC ---
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     let recognition;
     let finalTranscript = "";
     let isRecording = false;
-    let latestTranslation = "";
+    let latestVoiceTranslation = "";
 
     if (!SpeechRecognition) {
+        document.getElementById("voiceStatus").innerText = "❌ Browser doesn't support Speech Recognition. Use Chrome or Edge.";
         document.getElementById("startBtn").disabled = true;
     } else {
         recognition = new SpeechRecognition();
@@ -229,27 +345,28 @@ HTML_TEMPLATE = """
                     interim += event.results[i][0].transcript;
                 }
             }
-            document.getElementById("status").innerText = "🎙️ Hearing: " + (finalTranscript + interim);
+            document.getElementById("voiceStatus").innerText = "🎙️ Hearing: " + (finalTranscript + interim);
         };
 
         recognition.onerror = (event) => {
-            document.getElementById("status").innerText = "❌ Mic Error: " + event.error;
-            resetButtons();
+            document.getElementById("voiceStatus").innerText = "❌ Mic Error: " + event.error;
+            resetVoiceButtons();
         };
 
         recognition.onend = () => {
             if (isRecording) {
                 recognition.start();
             } else if (finalTranscript.trim().length > 0) {
-                translateText(finalTranscript.trim());
+                translateVoiceText(finalTranscript.trim());
             } else {
-                document.getElementById("status").innerText = "⚠️ Nothing heard. Try speaking again.";
-                resetButtons();
+                document.getElementById("voiceStatus").innerText = "⚠️ Nothing heard. Try speaking again.";
+                resetVoiceButtons();
             }
         };
     }
 
     function startListening() {
+        stopAllAudio();
         finalTranscript = "";
         isRecording = true;
         const srcFull = document.getElementById("srcLang").value;
@@ -257,56 +374,18 @@ HTML_TEMPLATE = """
         
         document.getElementById("startBtn").disabled = true;
         document.getElementById("stopBtn").disabled = false;
-        document.getElementById("status").innerText = "🎙️ Listening... Speak now!";
+        document.getElementById("voiceStatus").innerText = "🎙️ Listening... Speak now!";
         recognition.start();
     }
 
     function stopListening() {
         isRecording = false;
         document.getElementById("stopBtn").disabled = true;
-        document.getElementById("status").innerText = "🔄 Translating...";
+        document.getElementById("voiceStatus").innerText = "🔄 Translating...";
         recognition.stop();
     }
 
-    async function uploadAndTranslatePDF() {
-        const fileInput = document.getElementById("pdfInput");
-        if (!fileInput.files.length) {
-            document.getElementById("status").innerText = "⚠️ Please choose a PDF file first.";
-            return;
-        }
-
-        const tgtSelect = document.getElementById("tgtLang");
-        const [tgtSr, tgtCode] = tgtSelect.value.split("|");
-        const tgtName = tgtSelect.options[tgtSelect.selectedIndex].text;
-
-        const formData = new FormData();
-        formData.append("pdf", fileInput.files[0]);
-        formData.append("tgtCode", tgtCode);
-
-        document.getElementById("pdfBtn").disabled = true;
-        document.getElementById("status").innerText = "📄 Extracting and translating PDF (this may take a few seconds)...";
-
-        try {
-            const response = await fetch("/translate-pdf", {
-                method: "POST",
-                body: formData
-            });
-            const data = await response.json();
-
-            if (data.error) throw new Error(data.error);
-
-            appendBox("inputBox", `[PDF: ${fileInput.files[0].name}]:\\n${data.original}`);
-            appendBox("outputBox", `[${tgtName}]:\\n${data.translation}`);
-            latestTranslation = data.translation;
-            document.getElementById("status").innerText = "✅ PDF Translated! Click 'Read Translation' to listen.";
-        } catch (err) {
-            document.getElementById("status").innerText = "❌ PDF Error: " + err.message;
-        } finally {
-            document.getElementById("pdfBtn").disabled = false;
-        }
-    }
-
-    async function translateText(text) {
+    async function translateVoiceText(text) {
         const srcSelect = document.getElementById("srcLang");
         const tgtSelect = document.getElementById("tgtLang");
         const [srcSr, srcCode] = srcSelect.value.split("|");
@@ -314,11 +393,10 @@ HTML_TEMPLATE = """
         const srcName = srcSelect.options[srcSelect.selectedIndex].text;
         const tgtName = tgtSelect.options[tgtSelect.selectedIndex].text;
 
-        appendBox("inputBox", `[${srcName}]: ${text}`);
+        appendBox("voiceInputBox", `[${srcName}]: ${text}`);
 
         try {
             let translatedText = "";
-
             if (srcCode === tgtCode) {
                 translatedText = text;
             } else {
@@ -337,48 +415,30 @@ HTML_TEMPLATE = """
                     if (mmData.responseData && mmData.responseData.translatedText) {
                         translatedText = mmData.responseData.translatedText;
                     } else {
-                        throw new Error("All translation services are currently busy.");
+                        throw new Error("Translation service busy.");
                     }
                 }
             }
 
-            latestTranslation = translatedText;
-            appendBox("outputBox", `[${tgtName}]: ${translatedText}`);
-            document.getElementById("status").innerText = "🔊 Speaking translation...";
-            speakOutLoud(translatedText, tgtSr);
+            latestVoiceTranslation = translatedText;
+            appendBox("voiceOutputBox", `[${tgtName}]: ${translatedText}`);
+            document.getElementById("voiceStatus").innerText = `🔊 Speaking in ${tgtName}...`;
+            speakCloudText(translatedText, tgtCode, "voiceStatus");
         } catch (err) {
-            document.getElementById("status").innerText = "❌ Translation Error: " + err.message;
+            document.getElementById("voiceStatus").innerText = "❌ Error: " + err.message;
         } finally {
-            resetButtons();
+            resetVoiceButtons();
         }
     }
 
-    function readOutputAloud() {
-        const textToRead = latestTranslation || document.getElementById("outputBox").value;
-        if (!textToRead.trim()) {
-            document.getElementById("status").innerText = "⚠️ Nothing in the output box to read.";
+    function replayVoice() {
+        if (!latestVoiceTranslation.trim()) {
+            document.getElementById("voiceStatus").innerText = "⚠️ Nothing translated yet to speak.";
             return;
         }
-        const tgtSr = document.getElementById("tgtLang").value.split("|")[0];
-        document.getElementById("status").innerText = "🔊 Reading translation aloud...";
-        speakOutLoud(textToRead, tgtSr);
-    }
-
-    function speakOutLoud(text, langTag) {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = langTag;
-        utterance.rate = 0.95;
-        utterance.onend = () => {
-            document.getElementById("status").innerText = "✅ Done!";
-        };
-        window.speechSynthesis.speak(utterance);
-    }
-
-    function appendBox(id, text) {
-        const box = document.getElementById(id);
-        box.value = box.value ? box.value + "\\n----------------------------------------\\n" + text : text;
-        box.scrollTop = box.scrollHeight;
+        const tgtCode = document.getElementById("tgtLang").value.split("|")[1];
+        document.getElementById("voiceStatus").innerText = "🔊 Speaking translation...";
+        speakCloudText(latestVoiceTranslation, tgtCode, "voiceStatus");
     }
 
     function swapLanguages() {
@@ -389,18 +449,85 @@ HTML_TEMPLATE = """
         tgt.value = temp;
     }
 
-    function clearText() {
-        window.speechSynthesis.cancel();
-        latestTranslation = "";
-        document.getElementById("inputBox").value = "";
-        document.getElementById("outputBox").value = "";
-        document.getElementById("pdfInput").value = "";
-        document.getElementById("status").innerText = "Cleared! Ready to start.";
+    function clearVoice() {
+        stopAllAudio();
+        latestVoiceTranslation = "";
+        document.getElementById("voiceInputBox").value = "";
+        document.getElementById("voiceOutputBox").value = "";
+        document.getElementById("voiceStatus").innerText = "Cleared! Ready to start.";
     }
 
-    function resetButtons() {
+    function resetVoiceButtons() {
         document.getElementById("startBtn").disabled = false;
         document.getElementById("stopBtn").disabled = true;
+    }
+
+    // --- SECTION 2: PDF TRANSLATOR LOGIC ---
+    let latestPdfTranslation = "";
+
+    async function uploadAndTranslatePDF() {
+        const fileInput = document.getElementById("pdfInput");
+        if (!fileInput.files.length) {
+            document.getElementById("pdfStatus").innerText = "⚠️ Please choose a PDF file first.";
+            return;
+        }
+
+        const tgtSelect = document.getElementById("pdfTgtLang");
+        const tgtCode = tgtSelect.value;
+        const tgtName = tgtSelect.options[tgtSelect.selectedIndex].text;
+
+        const formData = new FormData();
+        formData.append("pdf", fileInput.files[0]);
+        formData.append("tgtCode", tgtCode);
+
+        document.getElementById("pdfBtn").disabled = true;
+        document.getElementById("pdfStatus").innerText = "📄 Extracting and translating PDF...";
+
+        try {
+            const response = await fetch("/translate-pdf", {
+                method: "POST",
+                body: formData
+            });
+            const data = await response.json();
+            if (data.error) throw new Error(data.error);
+
+            document.getElementById("pdfInputBox").value = data.original;
+            document.getElementById("pdfOutputBox").value = data.translation;
+            latestPdfTranslation = data.translation;
+            document.getElementById("pdfStatus").innerText = `✅ Translated to ${tgtName}! Click "Read PDF Aloud" to listen.`;
+        } catch (err) {
+            document.getElementById("pdfStatus").innerText = "❌ PDF Error: " + err.message;
+        } finally {
+            document.getElementById("pdfBtn").disabled = false;
+        }
+    }
+
+    function readPdfAloud() {
+        const text = latestPdfTranslation || document.getElementById("pdfOutputBox").value;
+        if (!text.trim()) {
+            document.getElementById("pdfStatus").innerText = "⚠️ Upload and translate a PDF first.";
+            return;
+        }
+        const tgtSelect = document.getElementById("pdfTgtLang");
+        const tgtCode = tgtSelect.value;
+        const tgtName = tgtSelect.options[tgtSelect.selectedIndex].text;
+        document.getElementById("pdfStatus").innerText = `🔊 Reading PDF in ${tgtName}...`;
+        speakCloudText(text, tgtCode, "pdfStatus");
+    }
+
+    function clearPdf() {
+        stopAllAudio();
+        latestPdfTranslation = "";
+        document.getElementById("pdfInput").value = "";
+        document.getElementById("pdfInputBox").value = "";
+        document.getElementById("pdfOutputBox").value = "";
+        document.getElementById("pdfStatus").innerText = "Cleared! Upload a new PDF.";
+    }
+
+    function appendBox(id, text) {
+        const box = document.getElementById(id);
+        box.value = box.value ? box.value + "\\n----------------------------------------\\n" + text : text;
+        box.scrollTop = box.scrollHeight;
     }
 </script>
 
@@ -428,6 +555,25 @@ def gtx_translate(text, src_code, tgt_code):
 @app.route("/")
 def index():
     return render_template_string(HTML_TEMPLATE)
+
+@app.route("/tts")
+def tts():
+    text = request.args.get("q", "")
+    lang = request.args.get("lang", "en")
+    if not text:
+        return "", 400
+    url = "https://translate.googleapis.com/translate_tts"
+    params = {
+        "ie": "UTF-8",
+        "client": "gtx",
+        "tl": lang,
+        "q": text
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    resp = requests.get(url, params=params, headers=headers, timeout=10)
+    return Response(resp.content, mimetype="audio/mpeg")
 
 @app.route("/translate", methods=["POST"])
 def translate():
@@ -460,13 +606,10 @@ def translate_pdf():
 
         full_text = "\n\n".join(pages_text)
         if not full_text.strip():
-            return jsonify({"error": "No selectable text found in this PDF (it may be a scanned image PDF)."}), 400
+            return jsonify({"error": "No selectable text found in this PDF (it may be a scanned image)."}), 400
 
-        # Split into 2,500-character chunks so multi-page PDFs don't hit URL length limits
         chunk_size = 2500
         chunks = [full_text[i:i + chunk_size] for i in range(0, len(full_text), chunk_size)]
-        
-        # Auto-detect source language ('auto') so any PDF language translates cleanly
         translated_chunks = [gtx_translate(chunk, "auto", tgt_code) for chunk in chunks]
         translated_full = "\n".join(translated_chunks)
 
