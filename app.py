@@ -6,7 +6,7 @@ from gtts import gTTS
 
 app = Flask(__name__)
 
-HTML_TEMPLATE = """
+HTML_TEMPLATE = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
