@@ -260,8 +260,10 @@ HTML_TEMPLATE = r"""
 
 <script>
     let currentAudio = null;
+    let isReadingStopped = false;
 
     function stopAllAudio() {
+        isReadingStopped = true;
         if (currentAudio) {
             currentAudio.pause();
             currentAudio.currentTime = 0;
@@ -272,36 +274,95 @@ HTML_TEMPLATE = r"""
         }
     }
 
+    function splitIntoSpeechChunks(text, maxLen) {
+        // Clean newlines and symbols so Malayalam TTS reads naturally without awkward pauses
+        const cleaned = text
+            .replace(/\r?\n+/g, ". ")
+            .replace(/[()[\]{}:*#_"-]+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+
+        const rawParts = cleaned.split(/(?<=[.!?।])\s+/);
+        const chunks = [];
+        let current = "";
+
+        for (let part of rawParts) {
+            if (!part) continue;
+            if ((current + " " + part).trim().length <= maxLen) {
+                current = (current + " " + part).trim();
+            } else {
+                if (current) chunks.push(current);
+                if (part.length > maxLen) {
+                    const words = part.split(" ");
+                    let sub = "";
+                    for (let w of words) {
+                        if ((sub + " " + w).trim().length <= maxLen) {
+                            sub = (sub + " " + w).trim();
+                        } else {
+                            if (sub) chunks.push(sub);
+                            sub = w;
+                        }
+                    }
+                    current = sub;
+                } else {
+                    current = part;
+                }
+            }
+        }
+        if (current) chunks.push(current);
+        return chunks;
+    }
+
     async function speakUniversal(text, langCode, bcpTag, statusId) {
         stopAllAudio();
         if (!text || !text.trim()) return;
+        isReadingStopped = false;
 
-        try {
-            const response = await fetch("/tts", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ text: text.slice(0, 1500), lang: langCode })
-            });
-            if (!response.ok) throw new Error("TTS server busy");
+        const chunks = splitIntoSpeechChunks(text, 180);
 
-            const blob = await response.blob();
-            const audioUrl = URL.createObjectURL(blob);
-            currentAudio = new Audio(audioUrl);
-            currentAudio.onended = () => {
-                document.getElementById(statusId).innerText = "✅ Finished reading!";
-            };
-            await currentAudio.play();
-        } catch (err) {
-            if (window.speechSynthesis) {
-                const utter = new SpeechSynthesisUtterance(text);
-                utter.lang = bcpTag;
-                utter.onend = () => {
-                    document.getElementById(statusId).innerText = "✅ Finished reading!";
-                };
-                window.speechSynthesis.speak(utter);
-            } else {
-                document.getElementById(statusId).innerText = "⚠️ Click Replay / Read Aloud button to hear audio.";
+        for (let i = 0; i < chunks.length; i++) {
+            if (isReadingStopped) return;
+            document.getElementById(statusId).innerText = "🔊 Reading part " + (i + 1) + " of " + chunks.length + "...";
+
+            try {
+                const response = await fetch("/tts", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ text: chunks[i], lang: langCode })
+                });
+                if (!response.ok) throw new Error("TTS server busy");
+
+                const blob = await response.blob();
+                if (isReadingStopped) return;
+
+                const audioUrl = URL.createObjectURL(blob);
+                await new Promise((resolve) => {
+                    currentAudio = new Audio(audioUrl);
+                    currentAudio.onended = () => {
+                        URL.revokeObjectURL(audioUrl);
+                        resolve();
+                    };
+                    currentAudio.onerror = () => {
+                        URL.revokeObjectURL(audioUrl);
+                        resolve();
+                    };
+                    currentAudio.play().catch(() => resolve());
+                });
+            } catch (err) {
+                if (window.speechSynthesis) {
+                    await new Promise((resolve) => {
+                        const utter = new SpeechSynthesisUtterance(chunks[i]);
+                        utter.lang = bcpTag;
+                        utter.onend = resolve;
+                        utter.onerror = resolve;
+                        window.speechSynthesis.speak(utter);
+                    });
+                }
             }
+        }
+
+        if (!isReadingStopped) {
+            document.getElementById(statusId).innerText = "✅ Finished reading!";
         }
     }
 
