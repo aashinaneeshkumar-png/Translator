@@ -12,7 +12,7 @@ HTML_TEMPLATE = r"""
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multi-Language Voice & PDF Translator</title>
+    <title>Multi-Language Voice, Text & PDF Translator</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -145,8 +145,8 @@ HTML_TEMPLATE = r"""
         }
         #startBtn { background-color: #3182ce; }
         #stopBtn { background-color: #e53e3e; }
-        #voiceSpeakBtn, #pdfSpeakBtn { background-color: #805ad5; }
-        #pdfBtn { background-color: #38a169; }
+        #voiceSpeakBtn, #pdfSpeakBtn, #textSpeakBtn { background-color: #805ad5; }
+        #pdfBtn, #textTranslateBtn { background-color: #38a169; }
         .stop-audio-btn { background-color: #dd6b20; }
         .clear-btn { background-color: #718096; }
     </style>
@@ -156,7 +156,7 @@ HTML_TEMPLATE = r"""
 <!-- SECTION 1: VOICE TRANSLATOR -->
 <div class="container">
     <h1>🎤 Voice-to-Voice Translator</h1>
-    <div class="subtitle">Scroll down for PDF Document Upload & Reader ↓</div>
+    <div class="subtitle">Scroll down for Text & PDF Translators ↓</div>
     
     <div class="controls">
         <select id="srcLang">
@@ -213,7 +213,48 @@ HTML_TEMPLATE = r"""
     </div>
 </div>
 
-<!-- SECTION 2: PDF UPLOAD & READER -->
+<!-- SECTION 2: CUSTOM TEXT TRANSLATOR & READER -->
+<div class="container">
+    <h2>✍️ Custom Text Translator & Reader</h2>
+    <div class="subtitle">Paste any text, translate it, and listen aloud</div>
+
+    <div class="pdf-lang-row">
+        <label for="textTgtLang">Translate to:</label>
+        <select id="textTgtLang">
+            <option value="en-US|en">English</option>
+            <option value="hi-IN|hi">Hindi</option>
+            <option value="ml-IN|ml" selected>Malayalam</option>
+            <option value="ta-IN|ta">Tamil</option>
+            <option value="te-IN|te">Telugu</option>
+            <option value="kn-IN|kn">Kannada</option>
+            <option value="bn-IN|bn">Bengali</option>
+            <option value="mr-IN|mr">Marathi</option>
+            <option value="es-ES|es">Spanish</option>
+            <option value="fr-FR|fr">French</option>
+            <option value="de-DE|de">German</option>
+            <option value="ar-SA|ar">Arabic</option>
+            <option value="ja-JP|ja">Japanese</option>
+            <option value="ko-KR|ko">Korean</option>
+        </select>
+    </div>
+
+    <div class="status" id="textStatus">Paste text below and click "Translate Text"</div>
+
+    <label>📋 Input Text (Paste here):</label>
+    <textarea id="customInputBox" placeholder="Paste or type text here to translate..."></textarea>
+
+    <label>🌐 Translated Text Output:</label>
+    <textarea id="customOutputBox" readonly placeholder="Translation will appear here..."></textarea>
+
+    <div class="btn-group">
+        <button type="button" id="textTranslateBtn" class="action-btn" onclick="translateCustomText()">🌐 Translate Text</button>
+        <button type="button" id="textSpeakBtn" class="action-btn" onclick="readCustomAloud()">🔊 Read Aloud</button>
+        <button type="button" class="action-btn stop-audio-btn" onclick="stopAllAudio()">🔇 Stop Audio</button>
+        <button type="button" class="action-btn clear-btn" onclick="clearCustomText()">🗑️ Clear</button>
+    </div>
+</div>
+
+<!-- SECTION 3: PDF UPLOAD & READER -->
 <div class="container" id="pdf-section">
     <h2>📄 PDF Document Translator & Reader</h2>
     <div class="subtitle">Upload any PDF, translate it, and listen in any language</div>
@@ -275,7 +316,6 @@ HTML_TEMPLATE = r"""
     }
 
     function splitIntoSpeechChunks(text, maxLen) {
-        // Clean newlines and symbols so Malayalam TTS reads naturally without awkward pauses
         const cleaned = text
             .replace(/\r?\n+/g, ". ")
             .replace(/[()[\]{}:*#_"-]+/g, " ")
@@ -366,7 +406,6 @@ HTML_TEMPLATE = r"""
         }
     }
 
-    // Client-side translation with GTX primary + MyMemory fallback (avoids server 429 blocks)
     async function clientTranslateChunk(text, srcCode, tgtCode) {
         if (srcCode === tgtCode) return text;
         try {
@@ -380,7 +419,6 @@ HTML_TEMPLATE = r"""
             }
         } catch (e) {}
 
-        // Fallback to MyMemory if GTX throttles
         const mmSrc = srcCode === "auto" ? "en" : srcCode;
         const mmUrl = "https://api.mymemory.translated.net/get?q=" + encodeURIComponent(text.slice(0, 480)) + "&langpair=" + mmSrc + "|" + tgtCode;
         const mmRes = await fetch(mmUrl);
@@ -391,6 +429,7 @@ HTML_TEMPLATE = r"""
         throw new Error("Translation rate-limited. Please try again in a moment.");
     }
 
+    // --- SECTION 1: VOICE TRANSLATOR ---
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     let recognition = null;
     let finalTranscript = "";
@@ -515,6 +554,71 @@ HTML_TEMPLATE = r"""
         document.getElementById("stopBtn").disabled = true;
     }
 
+    // --- SECTION 2: CUSTOM TEXT TRANSLATOR ---
+    let latestCustomTranslation = "";
+
+    async function translateCustomText() {
+        const inputVal = document.getElementById("customInputBox").value.trim();
+        if (!inputVal) {
+            document.getElementById("textStatus").innerText = "⚠️ Please paste or type some text first.";
+            return;
+        }
+
+        const tgtSelect = document.getElementById("textTgtLang");
+        const [tgtBcp, tgtCode] = tgtSelect.value.split("|");
+        const tgtName = tgtSelect.options[tgtSelect.selectedIndex].text;
+
+        document.getElementById("textTranslateBtn").disabled = true;
+        document.getElementById("textStatus").innerText = "🔄 Translating text into " + tgtName + "...";
+
+        try {
+            const chunkSize = 900;
+            const chunks = [];
+            for (let i = 0; i < inputVal.length; i += chunkSize) {
+                chunks.push(inputVal.slice(i, i + chunkSize));
+            }
+
+            let translatedParts = [];
+            for (let idx = 0; idx < chunks.length; idx++) {
+                const partTranslated = await clientTranslateChunk(chunks[idx], "auto", tgtCode);
+                translatedParts.push(partTranslated);
+                document.getElementById("customOutputBox").value = translatedParts.join("\n");
+                if (idx < chunks.length - 1) {
+                    await new Promise(r => setTimeout(r, 300));
+                }
+            }
+
+            latestCustomTranslation = translatedParts.join("\n");
+            document.getElementById("textStatus").innerText = "✅ Translated to " + tgtName + "! Click 'Read Aloud' to listen.";
+        } catch (err) {
+            document.getElementById("textStatus").innerText = "❌ Error: " + err.message;
+        } finally {
+            document.getElementById("textTranslateBtn").disabled = false;
+        }
+    }
+
+    function readCustomAloud() {
+        const text = latestCustomTranslation || document.getElementById("customOutputBox").value;
+        if (!text.trim()) {
+            document.getElementById("textStatus").innerText = "⚠️ Translate some text first.";
+            return;
+        }
+        const tgtSelect = document.getElementById("textTgtLang");
+        const [tgtBcp, tgtCode] = tgtSelect.value.split("|");
+        const tgtName = tgtSelect.options[tgtSelect.selectedIndex].text;
+        document.getElementById("textStatus").innerText = "🔊 Reading text in " + tgtName + "...";
+        speakUniversal(text, tgtCode, tgtBcp, "textStatus");
+    }
+
+    function clearCustomText() {
+        stopAllAudio();
+        latestCustomTranslation = "";
+        document.getElementById("customInputBox").value = "";
+        document.getElementById("customOutputBox").value = "";
+        document.getElementById("textStatus").innerText = "Cleared! Ready for new text.";
+    }
+
+    // --- SECTION 3: PDF TRANSLATOR ---
     let latestPdfTranslation = "";
 
     async function uploadAndTranslatePDF() {
@@ -546,7 +650,6 @@ HTML_TEMPLATE = r"""
             document.getElementById("pdfInputBox").value = fullText;
             document.getElementById("pdfOutputBox").value = "";
 
-            // Split into 900-char chunks and translate from browser to avoid server 429 errors
             const chunkSize = 900;
             const chunks = [];
             for (let i = 0; i < fullText.length; i += chunkSize) {
